@@ -1,0 +1,133 @@
+{
+  "checks": {
+    "rows": 2000,
+    "folds": {
+      "1": 400,
+      "2": 400,
+      "3": 400,
+      "4": 400,
+      "5": 400
+    },
+    "classes": 50,
+    "clips_per_class_min_max": [
+      40,
+      40
+    ],
+    "source_files_split_across_folds": 4,
+    "knock_categories": [
+      "door_wood_knock"
+    ],
+    "missing_files": 0,
+    "unexpected_audio_format": 0
+  },
+  "knock_class": "door_wood_knock",
+  "knock_clips": 40,
+  "knock_per_fold": {
+    "1": 8,
+    "2": 8,
+    "3": 8,
+    "4": 8,
+    "5": 8
+  },
+  "knock_distinct_source_files": 36,
+  "knock_mean_padded_fraction": 0.38344999999999996,
+  "all_other_mean_padded_fraction": 0.09331224489795918,
+  "knock_clips_with_any_padding": 27,
+  "other_clips_with_any_padding": 413,
+  "padding_rank_top10": [
+    [
+      "glass_breaking",
+      0.5407
+    ],
+    [
+      "sneezing",
+      0.41655
+    ],
+    [
+      "coughing",
+      0.3917
+    ],
+    [
+      "door_wood_knock",
+      0.38344999999999996
+    ],
+    [
+      "rooster",
+      0.3655
+    ],
+    [
+      "can_opening",
+      0.3286
+    ],
+    [
+      "car_horn",
+      0.2379
+    ],
+    [
+      "drinking_sipping",
+      0.20725000000000002
+    ],
+    [
+      "mouse_click",
+      0.18134999999999998
+    ],
+    [
+      "breathing",
+      0.1789
+    ]
+  ],
+  "knock_padding_rank": 4,
+  "auc_padding_alone": 0.7517793367346939,
+  "auc_rms_loudness": 0.4471938775510204,
+  "auc_peak_loudness": 0.6215369897959183,
+  "knock_rms_dbfs_mean": -25.43289581313504,
+  "others_rms_dbfs_mean": -24.459544539768224,
+  "loudness_baseline_leave_one_fold_out": {
+    "per_fold": [
+      {
+        "fold": 1,
+        "threshold_peak": 31845,
+        "tp": 4,
+        "fn": 4,
+        "fp": 125,
+        "tn": 267
+      },
+      {
+        "fold": 2,
+        "threshold_peak": 32767,
+        "tp": 2,
+        "fn": 6,
+        "fp": 120,
+        "tn": 272
+      },
+      {
+        "fold": 3,
+        "threshold_peak": 31845,
+        "tp": 5,
+        "fn": 3,
+        "fp": 115,
+        "tn": 277
+      },
+      {
+        "fold": 4,
+        "threshold_peak": 31977,
+        "tp": 4,
+        "fn": 4,
+        "fp": 121,
+        "tn": 271
+      },
+      {
+        "fold": 5,
+        "threshold_peak": 31845,
+        "tp": 5,
+        "fn": 3,
+        "fp": 114,
+        "tn": 278
+      }
+    ],
+    "recall": 0.5,
+    "false_alarm_rate_on_non_knock_clips": 0.30357142857142855,
+    "precision": 0.032520325203252036,
+    "always_say_no_accuracy": 0.98
+  }
+}

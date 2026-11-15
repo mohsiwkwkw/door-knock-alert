@@ -1,0 +1,160 @@
+{
+  "diagnostic_auc_trimmed_duration_alone": 0.27047831632653063,
+  "logreg": {
+    "mean_average_precision": 0.7796260449074703,
+    "mean_roc_auc": 0.9909438775510203,
+    "maxF1": {
+      "recall": 0.75,
+      "false_alarm_rate_non_knock": 0.006122448979591836,
+      "precision": 0.7142857142857143,
+      "knocks_caught": 30,
+      "knocks_missed": 10,
+      "false_alarms": 12,
+      "non_knock_clips": 1960
+    },
+    "recall90": {
+      "recall": 0.875,
+      "false_alarm_rate_non_knock": 0.023979591836734693,
+      "precision": 0.4268292682926829,
+      "knocks_caught": 35,
+      "knocks_missed": 5,
+      "false_alarms": 47,
+      "non_knock_clips": 1960
+    },
+    "most_flagged_non_knock_classes_maxF1": [
+      [
+        "door_wood_creaks",
+        4,
+        40
+      ],
+      [
+        "dog",
+        2,
+        40
+      ],
+      [
+        "footsteps",
+        2,
+        40
+      ],
+      [
+        "fireworks",
+        1,
+        40
+      ],
+      [
+        "car_horn",
+        1,
+        40
+      ],
+      [
+        "coughing",
+        1,
+        40
+      ],
+      [
+        "breathing",
+        1,
+        40
+      ]
+    ]
+  },
+  "svm_rbf": {
+    "mean_average_precision": 0.8574059274059274,
+    "mean_roc_auc": 0.9891581632653061,
+    "maxF1": {
+      "recall": 0.725,
+      "false_alarm_rate_non_knock": 0.00510204081632653,
+      "precision": 0.7435897435897436,
+      "knocks_caught": 29,
+      "knocks_missed": 11,
+      "false_alarms": 10,
+      "non_knock_clips": 1960
+    },
+    "recall90": {
+      "recall": 0.95,
+      "false_alarm_rate_non_knock": 0.018877551020408164,
+      "precision": 0.5066666666666667,
+      "knocks_caught": 38,
+      "knocks_missed": 2,
+      "false_alarms": 37,
+      "non_knock_clips": 1960
+    },
+    "most_flagged_non_knock_classes_maxF1": [
+      [
+        "door_wood_creaks",
+        4,
+        40
+      ],
+      [
+        "drinking_sipping",
+        2,
+        40
+      ],
+      [
+        "footsteps",
+        2,
+        40
+      ],
+      [
+        "fireworks",
+        1,
+        40
+      ],
+      [
+        "dog",
+        1,
+        40
+      ]
+    ]
+  },
+  "random_forest": {
+    "mean_average_precision": 0.7304095544163144,
+    "mean_roc_auc": 0.9893494897959185,
+    "maxF1": {
+      "recall": 0.7,
+      "false_alarm_rate_non_knock": 0.010714285714285714,
+      "precision": 0.5714285714285714,
+      "knocks_caught": 28,
+      "knocks_missed": 12,
+      "false_alarms": 21,
+      "non_knock_clips": 1960
+    },
+    "recall90": {
+      "recall": 0.825,
+      "false_alarm_rate_non_knock": 0.0163265306122449,
+      "precision": 0.5076923076923077,
+      "knocks_caught": 33,
+      "knocks_missed": 7,
+      "false_alarms": 32,
+      "non_knock_clips": 1960
+    },
+    "most_flagged_non_knock_classes_maxF1": [
+      [
+        "fireworks",
+        11,
+        40
+      ],
+      [
+        "footsteps",
+        4,
+        40
+      ],
+      [
+        "drinking_sipping",
+        3,
+        40
+      ],
+      [
+        "thunderstorm",
+        2,
+        40
+      ],
+      [
+        "door_wood_creaks",
+        1,
+        40
+      ]
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+# Core set for steps 2 to 4. Install into a project virtual environment only.
+numpy
+scipy
+scikit-learn
+pandas
+matplotlib
+soundfile
+librosa
+
+# Optional, for the pre-built sound model (YAMNet). Large download; ask before installing.
+# tensorflow
+# tensorflow-hub
