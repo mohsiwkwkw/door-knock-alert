@@ -120,6 +120,7 @@ Test set: ESC-50 fold 5, never used for training: 400 clips, 8 knocks and 392 ot
 - Both models miss the same three knock clips (5-218980-A-30, 5-218981-A-30, 5-250026-A-30). The mixed-sound model's single false alert is a drinking sound.
 - With 8 knocks, one clip is 12.5 points and the 95% interval for "knocks caught" is 31% to 86%, so a one-knock difference between models means little. False alerts and F1 separate models better here, but 392 clips is still small. The more reliable test is all five folds (40 knocks): the first-pass whole-clip SVM caught 29/40 with 10 false-alert clips out of 1,960 (precision 74%, F1 73%).
 - Compare other models only on this exact 400-clip fold, with the same counting rule.
+- Caveats found while checking the evaluation: the alert levels (0.95 and 1.55) were chosen from pooled held-out results that include fold 5's clips, so this is a held-out check and not an untouched final test (no untouched final test exists yet). The 8 knocks in fold 5 come from only 6 independent source recordings. Four source recordings in the whole dataset appear in two folds; all are non-knock sounds, and none of the knock sources crosses folds.
 
 ## Demo page and write-up
 
