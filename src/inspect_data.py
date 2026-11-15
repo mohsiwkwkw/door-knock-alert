@@ -1,8 +1,19 @@
 """Step 1 (clean): check and describe ESC-50 using only the Python standard library.
 
-Why standard library only: this machine has no numpy or pip yet, and this step needs
+Why standard library only: this machine had no numpy or pip yet, and this step needs
 none of them. The extracted dataset is treated as untrusted data: this script only
 reads it, never runs anything from inside it.
+
+Batches in this file
+  1  Tools and settings
+  2  Small helpers (read the clip list, convert to decibels)
+  3  Measure one WAV file (loudness and silent padding)
+  4  Score how well one number separates knocks from other sounds (AUC)
+  5  Pick the best loudness cut-off for a loudness-only alarm
+  6  main, part A: read the clip list and sanity-check every file
+  7  main, part B: how much silence padding and loudness each class has
+  8  main, part C: the loudness-only baseline, leave-one-fold-out
+  9  main, part D: save the report
 
 Usage (from the project folder, not from inside the data folder):
     python3 -I src/inspect_data.py --data data/esc50_raw/ESC-50-master --out results
@@ -19,19 +30,26 @@ from collections import Counter, defaultdict
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 import audioop  # noqa: E402  (present in Python 3.12, removed in 3.13)
 
-WIN = 441  # 10 ms at 44.1 kHz
+
+# ===== BATCH 1 | Tools and settings =====
+WIN = 441  # 10 ms at 44.1 kHz: the size of the pieces we check for "all zeros" (digital silence)
 
 
+# ===== BATCH 2 | Small helpers =====
 def read_meta(path):
+    """Read ESC-50's clip list (esc50.csv) into a list of dicts, one per clip."""
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
 def dbfs(x):
+    """Convert a 16-bit sample size to decibels relative to full scale (0 dB is the loudest possible)."""
     return 20 * math.log10(x / 32768.0) if x > 0 else -120.0
 
 
+# ===== BATCH 3 | Measure one WAV file =====
 def analyze_wav(path):
+    """Return format facts, loudness, and how much of the clip is exact-zero padding."""
     with wave.open(path, "rb") as w:
         ch, sw, rate, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
         raw = w.readframes(n)
@@ -43,11 +61,11 @@ def analyze_wav(path):
     zero = []
     for i in range(nwin):
         chunk = raw[i * WIN * 2:(i + 1) * WIN * 2]
-        zero.append(audioop.max(chunk, 2) == 0)
-    lead = 0
+        zero.append(audioop.max(chunk, 2) == 0)       # True if this 10 ms piece is pure silence
+    lead = 0                                          # count silent pieces at the start
     while lead < nwin and zero[lead]:
         lead += 1
-    trail = 0
+    trail = 0                                         # count silent pieces at the end
     while trail < nwin - lead and zero[nwin - 1 - trail]:
         trail += 1
     info.update(
@@ -60,6 +78,7 @@ def analyze_wav(path):
     return info
 
 
+# ===== BATCH 4 | Score how well one number separates knocks from the rest (AUC) =====
 def auc(scores_pos, scores_neg):
     """Rank-based AUC (Mann-Whitney), ties get average rank."""
     allv = sorted([(s, 1) for s in scores_pos] + [(s, 0) for s in scores_neg])
@@ -78,6 +97,7 @@ def auc(scores_pos, scores_neg):
     return (rpos - npos * (npos + 1) / 2) / (npos * nneg)
 
 
+# ===== BATCH 5 | Pick the best loudness cut-off for a loudness-only alarm =====
 def best_threshold(rows, key):
     """Pick the threshold on `key` that maximizes F1 for knock vs rest."""
     vals = sorted({r[key] for r in rows})
@@ -93,6 +113,7 @@ def best_threshold(rows, key):
 
 
 def main():
+    # ===== BATCH 6 | main, part A: read the clip list and sanity-check every file =====
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
@@ -127,6 +148,7 @@ def main():
             continue
         rows.append({
             "filename": r["filename"], "fold": int(r["fold"]), "category": r["category"],
+            # first guess at the knock label; it is set again properly in part B below
             "knock": r["category"] in knock_cats[:1] if knock_cats else False,
             "src_file": r["src_file"],
             **{k: info[k] for k in ("rms", "peak", "zero_frac", "lead_frac", "trail_frac")},
@@ -134,6 +156,7 @@ def main():
     checks["missing_files"] = len(missing)
     checks["unexpected_audio_format"] = len(bad_format)
 
+    # ===== BATCH 7 | main, part B: how much silence padding and loudness each class has =====
     # Which knock class is "the" door knock? Prefer the one named *_knock
     knock_name = next((c for c in knock_cats), None)
     knock_rows = [r for r in rows if r["category"] == knock_name]
@@ -170,6 +193,7 @@ def main():
         "others_rms_dbfs_mean": sum(dbfs(r["rms"]) for r in other_rows) / len(other_rows),
     }
 
+    # ===== BATCH 8 | main, part C: the loudness-only baseline, leave-one-fold-out =====
     # Loudness-threshold baseline, leave-one-fold-out, clip level, on peak level
     folds = sorted({r["fold"] for r in rows})
     base = []
@@ -183,7 +207,10 @@ def main():
         ffp = sum(1 for r in test if not r["knock"] and r["peak"] >= t)
         ftn = sum(1 for r in test if not r["knock"] and r["peak"] < t)
         base.append({"fold": f, "threshold_peak": t, "tp": ftp, "fn": ffn, "fp": ffp, "tn": ftn})
-        tp += ftp; fn += ffn; fp += ffp; tn += ftn
+        tp += ftp
+        fn += ffn
+        fp += ffp
+        tn += ftn
     results["loudness_baseline_leave_one_fold_out"] = {
         "per_fold": base,
         "recall": tp / (tp + fn) if tp + fn else 0.0,
@@ -192,6 +219,7 @@ def main():
         "always_say_no_accuracy": (tn + fp) / (tp + fn + tn + fp),
     }
 
+    # ===== BATCH 9 | main, part D: save the report =====
     os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(a.out, "data_report.json"), "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)

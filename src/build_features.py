@@ -1,5 +1,4 @@
-"""Steps 1b and 2: apply the cleaning rule and build features. NOT RUN YET (needs numpy,
-soundfile and librosa, which are not installed on this machine yet).
+"""Steps 1b and 2 (first pass): clean each clip, then turn the WHOLE clip into one row of numbers.
 
 Cleaning rule (from the data check, see README):
   - ESC-50 clips are padded with digital silence, and padding alone separates knocks from the
@@ -9,6 +8,15 @@ Cleaning rule (from the data check, see README):
     loudness cannot be used. Loudness is tested on purpose later, in the mixing test.
   - Features are length-invariant summaries (mean, std, max over frames). Trimmed duration is
     saved only as a diagnostic and is never a feature.
+
+The output (results/features.npz) feeds baseline_models.py, the first comparison of models.
+The better detector (run_stress_test.py) later works on 0.5 s windows instead of whole clips.
+
+Batches in this file
+  1  Tools and settings
+  2  Cut off the silent padding
+  3  Describe one clip with 132 numbers
+  4  main: loop over all 2,000 clips and save the table
 
 Usage (run from the doorknock folder, with the project venv's python):
     .venv/bin/python -I src/build_features.py --data data/esc50_raw/ESC-50-master --out results/features.npz
@@ -21,38 +29,43 @@ import librosa
 import numpy as np
 import soundfile as sf
 
-SR = 44100
-HOP10MS = 441
-KNOCK = "door_wood_knock"
+
+# ===== BATCH 1 | Tools and settings =====
+SR = 44100                   # samples per second in every ESC-50 clip
+HOP10MS = 441                # 441 samples = 10 ms
+KNOCK = "door_wood_knock"    # the ESC-50 category we treat as "a door knock"
 
 
+# ===== BATCH 2 | Cut off the silent padding =====
 def trim_padding(y):
     n = len(y) // HOP10MS
     if n == 0:
         return y
-    w = np.abs(y[: n * HOP10MS]).reshape(n, HOP10MS).max(axis=1)
-    nz = np.nonzero(w > 0)[0]
+    w = np.abs(y[: n * HOP10MS]).reshape(n, HOP10MS).max(axis=1)   # loudest sample in each 10 ms piece
+    nz = np.nonzero(w > 0)[0]                                      # pieces that are not pure silence
     if len(nz) == 0:
         return y[:HOP10MS]
     return y[nz[0] * HOP10MS: (nz[-1] + 1) * HOP10MS]
 
 
+# ===== BATCH 3 | Describe one clip with 132 numbers =====
 def clip_features(y):
-    y = y / (np.max(np.abs(y)) + 1e-9)
+    y = y / (np.max(np.abs(y)) + 1e-9)                   # scale so the peak is 1: volume is removed
     if len(y) < 4096:
-        y = np.pad(y, (0, 4096 - len(y)))
-    kw = dict(sr=SR, n_fft=2048, hop_length=512)
-    mf = librosa.feature.mfcc(y=y, n_mfcc=20, **kw)
-    d = librosa.feature.delta(mf, width=3)
-    cen = librosa.feature.spectral_centroid(y=y, **kw)
-    bw = librosa.feature.spectral_bandwidth(y=y, **kw)
-    roll = librosa.feature.spectral_rolloff(y=y, **kw)
+        y = np.pad(y, (0, 4096 - len(y)))                # very short clips are padded so the maths works
+    kw = dict(sr=SR, n_fft=2048, hop_length=512)         # 2048-sample frames, a new one every 512 samples
+    mf = librosa.feature.mfcc(y=y, n_mfcc=20, **kw)      # 20 "tone colour" numbers per frame
+    d = librosa.feature.delta(mf, width=3)               # how those 20 numbers change from frame to frame
+    cen = librosa.feature.spectral_centroid(y=y, **kw)   # brightness
+    bw = librosa.feature.spectral_bandwidth(y=y, **kw)   # how spread out the pitches are
+    roll = librosa.feature.spectral_rolloff(y=y, **kw)   # where the high pitches cut off
     zcr = librosa.feature.zero_crossing_rate(y, frame_length=2048, hop_length=512)
-    stack = np.vstack([mf, d, cen, bw, roll, zcr])
-    return np.concatenate([stack.mean(axis=1), stack.std(axis=1), stack.max(axis=1)])
+    stack = np.vstack([mf, d, cen, bw, roll, zcr])       # 44 rows, one column per frame
+    return np.concatenate([stack.mean(axis=1), stack.std(axis=1), stack.max(axis=1)])   # 44 x 3 = 132
 
 
 def main():
+    # ===== BATCH 4 | main: loop over all 2,000 clips and save the table =====
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)

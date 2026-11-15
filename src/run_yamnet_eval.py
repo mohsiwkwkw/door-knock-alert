@@ -11,6 +11,16 @@ ESC-50 non-knock sound; mixtures of held-out knocks and held-out home sounds at 
 a hit counts only if an alert falls inside the knock's time span. Training frames: every valid
 frame of a knock clip counts as a knock frame (weak labels).
 
+Batches in this file
+  1  Settings (copied from run_stress_test.py so this file stays self-contained)
+  2  Helpers: merge alerts, error bars, group YAMNet frames by clip
+  3  main, part A: load the saved YAMNet outputs
+  4  main, part B: gather the training frames for the logistic regression
+  5  main, part C: score every frame with each of the four detectors
+  6  main, part D: curves of knocks caught versus false alerts per hour
+  7  main, part E: pick operating points and run the stress test
+  8  main, part F: side-by-side with our SVM, error bars, save
+
 Run (main environment): .venv/bin/python -I src/run_yamnet_eval.py --results results
 """
 import argparse
@@ -23,6 +33,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+
+# ===== BATCH 1 | Settings =====
 KNOCK = "door_wood_knock"
 HOME = {"mouse_click", "keyboard_typing", "door_wood_creaks", "can_opening", "washing_machine",
         "vacuum_cleaner", "clock_alarm", "clock_tick", "glass_breaking", "footsteps", "clapping",
@@ -32,7 +44,9 @@ SNRS = [10, 5, 0, -5, -10]
 TARGETS = [5.0, 20.0]
 
 
+# ===== BATCH 2 | Helpers =====
 def merge(times, refr=1.0):
+    """Keep one alert per second (same rule as run_stress_test.py)."""
     out = []
     for x in sorted(times):
         if not out or x - out[-1] >= refr:
@@ -41,6 +55,7 @@ def merge(times, refr=1.0):
 
 
 def wilson(k, n, z=1.96):
+    """95% interval for a proportion k out of n (same formula as run_stress_test.py)."""
     p = k / n
     d = 1 + z * z / n
     c = (p + z * z / (2 * n)) / d
@@ -49,22 +64,26 @@ def wilson(k, n, z=1.96):
 
 
 def split_by_owner(owner, n):
+    """YAMNet frames are stored in one long list; this returns, for each clip, the row numbers of its frames."""
     order = np.argsort(owner, kind="stable")
     bounds = np.searchsorted(owner[order], np.arange(n + 1))
     return [order[bounds[i]:bounds[i + 1]] for i in range(n)]
 
 
 def main():
+    # ===== BATCH 3 | main, part A: load the saved YAMNet outputs =====
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True)
     a = ap.parse_args()
     R = a.results
     meta = json.load(open(os.path.join(R, "mixture_meta.json"), encoding="utf-8"))
-    cat = np.array(meta["categories"]); fold = np.array(meta["folds"]); n = len(cat)
+    cat = np.array(meta["categories"])
+    fold = np.array(meta["folds"])
+    n = len(cat)
     is_knock = cat == KNOCK
     is_home = np.array([c in HOME for c in cat])
     names = list(np.load(os.path.join(R, "yamnet_class_names.npy")))
-    k_i, d_i = names.index("Knock"), names.index("Door")
+    k_i, d_i = names.index("Knock"), names.index("Door")      # which of YAMNet's 521 classes are "Knock" and "Door"
 
     C = np.load(os.path.join(R, "yam_clean.npz"))
     Au = np.load(os.path.join(R, "yam_aug.npz"))
@@ -80,8 +99,9 @@ def main():
     hours_all = float(sum(hi_s[i] - lo_s[i] for i in neg_idx) / 3600)
     hours_home = float(sum(hi_s[i] - lo_s[i] for i in home_set) / 3600)
 
-    # ---- training frames for the logistic regression ----
-    valid = C["valid"]; emb = C["emb"]
+    # ===== BATCH 4 | main, part B: gather the training frames for the logistic regression =====
+    valid = C["valid"]
+    emb = C["emb"]
     pos_rows, neg_rows = [], []
     for i in range(n):
         rows_i = c_slices[i][valid[c_slices[i]]]
@@ -98,16 +118,18 @@ def main():
     def fit_lr(test_fold, use_aug):
         pr = np.concatenate([r for i, r in pos_rows if fold[i] != test_fold])
         nr = np.concatenate([r for i, r in neg_rows if fold[i] != test_fold])
-        X = [emb[pr], emb[nr]]; y = [np.ones(len(pr)), np.zeros(len(nr))]
+        X = [emb[pr], emb[nr]]
+        y = [np.ones(len(pr)), np.zeros(len(nr))]
         if use_aug:
             ar = [r for kf, bf, r in aug_pos if kf != test_fold and bf != test_fold and len(r)]
             if ar:
                 ar = np.concatenate(ar)
-                X.append(Au["emb"][ar]); y.append(np.ones(len(ar)))
+                X.append(Au["emb"][ar])
+                y.append(np.ones(len(ar)))
         mdl = make_pipeline(StandardScaler(), LogisticRegression(C=0.05, class_weight="balanced", max_iter=3000))
         return mdl.fit(np.vstack(X), np.concatenate(y))
 
-    # ---- frame scores per detector ----
+    # ===== BATCH 5 | main, part C: score every frame with each of the four detectors =====
     clean_sc, test_sc = {}, {}
     zs = {"yamnet_knock": lambda S: S[:, k_i].astype("float32"),
           "yamnet_knock_or_door": lambda S: np.maximum(S[:, k_i], S[:, d_i]).astype("float32")}
@@ -134,11 +156,12 @@ def main():
         s, t, v = clean_sc[name][i], ctime_c[i], valid_c[i]
         return merge(list(t[(s >= thr) & v]))
 
+    # ===== BATCH 6 | main, part D: curves of knocks caught versus false alerts per hour =====
     results = {"hours_all_negative_audio": hours_all, "hours_home_negative_audio": hours_home, "operating_points": {}}
     curves = {}
     for name in clean_sc:
         negv = np.concatenate([clean_sc[name][i][valid_c[i]] for i in neg_idx])
-        grid = np.unique(np.quantile(negv, np.linspace(0.90, 0.99995, 160)))
+        grid = np.unique(np.quantile(negv, np.linspace(0.90, 0.99995, 160)))     # candidate alert levels
         rows = []
         for thr in grid:
             rec = float(np.mean([len(clip_alerts(name, i, thr)) > 0 for i in knock_idx]))
@@ -148,6 +171,7 @@ def main():
         curves[name] = rows
     results["curves"] = curves
 
+    # ===== BATCH 7 | main, part E: pick operating points and run the stress test =====
     def mix_hits(name, thr):
         res, hl = {}, []
         for snr in SNRS:
@@ -159,7 +183,8 @@ def main():
                 s, t = test_sc[name][j], ctime_t[j]
                 al = merge(list(t[s >= thr]))
                 h = any(lo <= x <= hi for x in al)
-                hit += h; tot += 1
+                hit += h
+                tot += 1
                 hl.append((int(m["knock_index"]), int(snr), int(h)))
             res[str(snr)] = dict(hits=int(hit), total=int(tot), recall=hit / tot, ci95=wilson(int(hit), int(tot)))
         return res, hl
@@ -176,6 +201,7 @@ def main():
                                mixture_recall_by_snr=res, mixture_hits=hl)
         results["operating_points"][f"{target:g}_false_alerts_per_hour"] = block
 
+    # ===== BATCH 8 | main, part F: side-by-side with our SVM, error bars, save =====
     # ---- bring in our SVM numbers for a side-by-side table and error bars ----
     svm = json.load(open(os.path.join(R, "stress_results.json"), encoding="utf-8"))["operating_points"]
     rng = np.random.default_rng(0)

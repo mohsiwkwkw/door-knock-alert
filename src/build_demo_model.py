@@ -10,6 +10,14 @@ results/stress_results.json (about 5 false alerts per hour for the models; about
 for the loudness alarm, which cannot get lower). The demo models are single retrained
 instances, so their exact false-alert rate can differ a little from the pooled figure.
 
+Batches in this file
+  1  Tools and settings
+  2  main, part A: describe every clip (reuses run_stress_test.py)
+  3  main, part B: training windows from folds 1 to 4 (knock and not-knock)
+  4  main, part C: mixed-sound knock windows for the second model
+  5  main, part D: train the two models
+  6  main, part E: save the models and the demo settings
+
 Run: .venv/bin/python -I src/build_demo_model.py --data data/esc50_raw/ESC-50-master --results results --out demo
 """
 import argparse
@@ -24,13 +32,16 @@ import joblib
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import run_stress_test as rst  # noqa: E402
+import run_stress_test as rst  # noqa: E402  (we reuse its feature code so the demo cannot drift from the experiments)
 
-TRAIN_FOLDS = {1, 2, 3, 4}
-DEMO_FOLD = 5
+
+# ===== BATCH 1 | Tools and settings =====
+TRAIN_FOLDS = {1, 2, 3, 4}     # the models practise on these folds only
+DEMO_FOLD = 5                  # the demo's example clips all come from this fold
 
 
 def main():
+    # ===== BATCH 2 | main, part A: describe every clip (reuses run_stress_test.py) =====
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--results", required=True)
@@ -50,6 +61,7 @@ def main():
     with ProcessPoolExecutor(6, mp_context=ctx) as ex:
         recs = list(ex.map(rst.clip_worker, fname, chunksize=20))
 
+    # ===== BATCH 3 | main, part B: training windows from folds 1 to 4 (knock and not-knock) =====
     rng = np.random.default_rng(0)
     pos, neg = [], []
     for i, rc in enumerate(recs):
@@ -65,8 +77,10 @@ def main():
             X, _ = rst.windows_of(rc["F"], rc["r"], rc["a0"], rc["b0"])
             for j in rng.choice(len(X), size=min(rst.NEG_PER_CLIP, len(X)), replace=False):
                 neg.append(X[j])
-    pos = np.array(pos, dtype="float32"); neg = np.array(neg, dtype="float32")
+    pos = np.array(pos, dtype="float32")
+    neg = np.array(neg, dtype="float32")
 
+    # ===== BATCH 4 | main, part C: mixed-sound knock windows for the second model =====
     knock_idx = [i for i in np.nonzero(is_knock)[0] if fold[i] in TRAIN_FOLDS]
     home_by_fold = {f: np.nonzero(is_home & (fold == f) & ~is_knock)[0] for f in TRAIN_FOLDS}
     specs, owners = [], []
@@ -91,6 +105,7 @@ def main():
     aug = np.array(aug, dtype="float32")
     print(f"training windows: {len(pos)} knock, {len(neg)} other, {len(aug)} mixed-sound knock", flush=True)
 
+    # ===== BATCH 5 | main, part D: train the two models =====
     def mk():
         return rst.make_pipeline(rst.StandardScaler(), rst.SVC(C=2.0, kernel="rbf", class_weight="balanced"))
 
@@ -98,6 +113,7 @@ def main():
     clean = mk().fit(np.vstack([pos, neg]), y1)
     augm = mk().fit(np.vstack([pos, neg, aug]), np.r_[y1, np.ones(len(aug))])
 
+    # ===== BATCH 6 | main, part E: save the models and the demo settings =====
     ops = json.load(open(os.path.join(a.results, "stress_results.json"), encoding="utf-8"))["operating_points"]
     cfg = dict(
         threshold_clean=ops["5_false_alerts_per_hour"]["single (clean-trained)"]["setting"]["thi"],

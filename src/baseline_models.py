@@ -1,5 +1,6 @@
 """Steps 3 and 4 (first pass): train and test knock-vs-rest models with leave-one-fold-out.
-NOT RUN YET (needs numpy and scikit-learn, not installed on this machine yet).
+
+Input: results/features.npz from build_features.py (one 132-number row per whole clip).
 
 For each held-out ESC-50 fold, models train on the other four folds. The alert threshold is
 chosen using only the training folds (inner cross-validation scores), never the test fold.
@@ -9,6 +10,12 @@ Two operating points are reported:
 Reported per operating point: recall (knocks caught), false-alarm rate on non-knock clips,
 precision. Also average precision and ROC AUC per fold, and which non-knock classes are
 flagged most often. Accuracy is deliberately not reported (always saying "no" scores 98%).
+
+Batches in this file
+  1  Tools and the three candidate models
+  2  Helpers: score a model, get honest training scores, choose thresholds, count results
+  3  main, part A: for every held-out fold, train, choose thresholds, test
+  4  main, part B: save the results
 
 Usage:
     .venv/bin/python -I src/baseline_models.py --features results/features.npz --out results
@@ -27,20 +34,30 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
+
+# ===== BATCH 1 | Tools and the three candidate models =====
+# Each entry builds a fresh, untrained model. class_weight="balanced" makes the rare knock
+# examples count more, because there are 49 non-knock clips for every knock clip.
 MODELS = {
-    "logreg": lambda: make_pipeline(StandardScaler(), LogisticRegression(C=0.5, class_weight="balanced", max_iter=3000)),
-    "svm_rbf": lambda: make_pipeline(StandardScaler(), SVC(C=2.0, kernel="rbf", class_weight="balanced")),
-    "random_forest": lambda: RandomForestClassifier(n_estimators=400, class_weight="balanced_subsample", random_state=0, n_jobs=-1),
+    "logreg": lambda: make_pipeline(
+        StandardScaler(), LogisticRegression(C=0.5, class_weight="balanced", max_iter=3000)),
+    "svm_rbf": lambda: make_pipeline(
+        StandardScaler(), SVC(C=2.0, kernel="rbf", class_weight="balanced")),
+    "random_forest": lambda: RandomForestClassifier(
+        n_estimators=400, class_weight="balanced_subsample", random_state=0, n_jobs=-1),
 }
 
 
+# ===== BATCH 2 | Helpers =====
 def score(model, X):
+    """One 'how knock-like?' number per row (the SVM and logreg give a distance; the forest a probability)."""
     if hasattr(model, "decision_function"):
         return model.decision_function(X)
     return model.predict_proba(X)[:, 1]
 
 
 def oof_scores(make, X, y, n=4):
+    """Out-of-fold scores: every training clip is scored by a model that never saw that clip."""
     s = np.zeros(len(y))
     for tr, va in StratifiedKFold(n, shuffle=True, random_state=0).split(X, y):
         s[va] = score(make().fit(X[tr], y[tr]), X[va])
@@ -48,18 +65,21 @@ def oof_scores(make, X, y, n=4):
 
 
 def thr_max_f1(s, y):
+    """The alert level with the best F1 on these scores."""
     p, r, t = precision_recall_curve(y, s)
     f1 = 2 * p[:-1] * r[:-1] / np.maximum(p[:-1] + r[:-1], 1e-12)
     return float(t[int(np.argmax(f1))])
 
 
 def thr_recall(s, y, target=0.9):
+    """The strictest alert level that still catches `target` (90%) of the knocks."""
     pos = np.sort(s[y == 1])
     k = int(np.floor((1 - target) * len(pos)))
     return float(pos[k])
 
 
 def counts(s, y, thr):
+    """Knocks caught, knocks missed, false alerts, and quiet clips correctly left alone."""
     pred = s >= thr
     tp = int(np.sum(pred & (y == 1)))
     fn = int(np.sum(~pred & (y == 1)))
@@ -69,6 +89,7 @@ def counts(s, y, thr):
 
 
 def main():
+    # ===== BATCH 3 | main, part A: for every held-out fold, train, choose thresholds, test =====
     ap = argparse.ArgumentParser()
     ap.add_argument("--features", required=True)
     ap.add_argument("--out", required=True)
@@ -86,7 +107,7 @@ def main():
         flagged = Counter()
         negatives = Counter(cat[y == 0])
         for f in sorted(set(fold.tolist())):
-            tr, te = fold != f, fold == f
+            tr, te = fold != f, fold == f                        # train on four folds, test on the fifth
             s_tr = oof_scores(make, X[tr], y[tr])
             thrs = {"maxF1": thr_max_f1(s_tr, y[tr]), "recall90": thr_recall(s_tr, y[tr])}
             model = make().fit(X[tr], y[tr])
@@ -114,6 +135,7 @@ def main():
         report[name] = res
         print(name, json.dumps({k: v for k, v in res.items() if k != "most_flagged_non_knock_classes_maxF1"}, indent=1))
 
+    # ===== BATCH 4 | main, part B: save the results =====
     os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(a.out, "baselines.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)

@@ -10,10 +10,20 @@ Inputs: results/mix_aug_16k.npy, results/mix_test_16k.npy (written by
 YAMNet is not gain-invariant, so every waveform is scaled to a peak of 0.95 before it is
 analysed (clean clips and mixtures alike). YAMNet reports one set of scores and one
 1024-number embedding for each 0.96 s patch, with a new patch every 0.48 s.
+
+Batches in this file
+  1  Settings
+  2  Helpers: find the real sound, run YAMNet on one waveform
+  3  main, part A: load YAMNet and the clip list
+  4  main, part B: run YAMNet on every clean clip
+  5  main, part C: run YAMNet on the training and test mixtures
+
+(trim_bounds is copied from run_stress_test.py on purpose: this file runs in the separate
+TensorFlow environment, which does not have librosa or scikit-learn.)
 """
 import os
 
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")     # keep TensorFlow's chatty logs quiet
 
 import argparse
 import csv
@@ -24,9 +34,12 @@ import soundfile as sf
 import tensorflow_hub as hub
 from scipy.signal import resample_poly
 
-PATCH, HOPS = 0.96, 0.48
+
+# ===== BATCH 1 | Settings =====
+PATCH, HOPS = 0.96, 0.48     # YAMNet looks at 0.96 s at a time and moves on 0.48 s each step
 
 
+# ===== BATCH 2 | Helpers =====
 def trim_bounds(y):
     n = len(y) // 441
     w = np.abs(y[: n * 441]).reshape(n, 441).max(axis=1)
@@ -37,12 +50,14 @@ def trim_bounds(y):
 
 
 def analyse(model, w16):
+    """Run YAMNet on a 16 kHz waveform; return its class scores and its 1024-number embeddings."""
     w16 = (w16 / (np.max(np.abs(w16)) + 1e-9) * 0.95).astype("float32")
     scores, emb, _ = model(w16)
     return scores.numpy().astype("float16"), emb.numpy().astype("float32")
 
 
 def main():
+    # ===== BATCH 3 | main, part A: load YAMNet and the clip list =====
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--results", required=True)
@@ -54,30 +69,39 @@ def main():
 
     with open(os.path.join(a.data, "meta", "esc50.csv"), newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
+
+    # ===== BATCH 4 | main, part B: run YAMNet on every clean clip =====
     sc_all, em_all, owner, ctime, valid, lo_s, hi_s = [], [], [], [], [], [], []
     for i, r in enumerate(rows):
         y, sr = sf.read(os.path.join(a.data, "audio", r["filename"]), dtype="float32")
         lo, hi = trim_bounds(y)
         lo_t, hi_t = lo / 44100.0, hi / 44100.0
-        w = resample_poly(y, 160, 441).astype("float32")
+        w = resample_poly(y, 160, 441).astype("float32")       # YAMNet wants 16 kHz audio
         sc, em = analyse(model, w)
         starts = np.arange(len(sc)) * HOPS
         overlap = np.minimum(starts + PATCH, hi_t) - np.maximum(starts, lo_t)
-        sc_all.append(sc); em_all.append(em); owner.append(np.full(len(sc), i))
-        ctime.append(starts + HOPS); valid.append(overlap >= min(0.25, hi_t - lo_t))
-        lo_s.append(lo_t); hi_s.append(hi_t)
+        sc_all.append(sc)
+        em_all.append(em)
+        owner.append(np.full(len(sc), i))                       # which clip each YAMNet frame came from
+        ctime.append(starts + HOPS)
+        valid.append(overlap >= min(0.25, hi_t - lo_t))         # skip frames that are mostly padding
+        lo_s.append(lo_t)
+        hi_s.append(hi_t)
         if (i + 1) % 400 == 0:
             print(f"[{time.time() - t0:.0f}s] clean {i + 1}/{len(rows)}", flush=True)
     np.savez(os.path.join(a.results, "yam_clean.npz"), scores=np.concatenate(sc_all), emb=np.concatenate(em_all),
              owner=np.concatenate(owner), ctime=np.concatenate(ctime), valid=np.concatenate(valid),
              lo_s=np.array(lo_s), hi_s=np.array(hi_s))
 
+    # ===== BATCH 5 | main, part C: run YAMNet on the training and test mixtures =====
     for tag in ("aug", "test"):
         audio = np.load(os.path.join(a.results, f"mix_{tag}_16k.npy"))
         sc_all, em_all, owner, ctime = [], [], [], []
         for i in range(len(audio)):
             sc, em = analyse(model, audio[i])
-            sc_all.append(sc); em_all.append(em); owner.append(np.full(len(sc), i))
+            sc_all.append(sc)
+            em_all.append(em)
+            owner.append(np.full(len(sc), i))
             ctime.append(np.arange(len(sc)) * HOPS + HOPS)
         np.savez(os.path.join(a.results, f"yam_{tag}.npz"), scores=np.concatenate(sc_all), emb=np.concatenate(em_all),
                  owner=np.concatenate(owner), ctime=np.concatenate(ctime))

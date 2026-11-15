@@ -5,8 +5,16 @@ same 400 clips can be compared in the same format. A clip counts as "knock detec
 model raises at least one alert anywhere in it, and as a "false alert" if a non-knock clip raises
 at least one alert. Uses the demo models and thresholds from build_demo_model.py.
 
+Batches in this file
+  1  Tools
+  2  The scorecard formula (accuracy, recall, precision, F1 and error bars)
+  3  main, part A: describe the 400 fold-5 clips
+  4  main, part B: score them with each demo model
+  5  main, part C: save the scorecard and print it
+
 Run: .venv/bin/python -I src/fold5_report.py --data data/esc50_raw/ESC-50-master --demo demo --out results
 """
+# ===== BATCH 1 | Tools =====
 import argparse
 import csv
 import json
@@ -18,10 +26,12 @@ from concurrent.futures import ProcessPoolExecutor
 import joblib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import run_stress_test as rst  # noqa: E402
+import run_stress_test as rst  # noqa: E402  (same feature code and alert rules as the experiments)
 
 
+# ===== BATCH 2 | The scorecard formula =====
 def metrics(tp, fn, fp, tn):
+    """Turn four counts (caught, missed, false alerts, correctly quiet) into the scorecard numbers."""
     n = tp + fn + fp + tn
     prec = tp / (tp + fp) if tp + fp else 0.0
     rec = tp / (tp + fn)
@@ -32,6 +42,7 @@ def metrics(tp, fn, fp, tn):
 
 
 def main():
+    # ===== BATCH 3 | main, part A: describe the 400 fold-5 clips =====
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--demo", required=True)
@@ -42,6 +53,8 @@ def main():
         rows = [r for r in csv.DictReader(f) if int(r["fold"]) == 5]
     with ProcessPoolExecutor(6, mp_context=mp.get_context("fork")) as ex:
         recs = list(ex.map(rst.clip_worker, [r["filename"] for r in rows], chunksize=10))
+
+    # ===== BATCH 4 | main, part B: score them with each demo model =====
     models = joblib.load(os.path.join(a.demo, "models.joblib"))
     cfg = json.load(open(os.path.join(a.demo, "config.json"), encoding="utf-8"))
     out = {"test_set": "ESC-50 fold 5", "clips": len(rows),
@@ -54,16 +67,20 @@ def main():
             X, t = rst.windows_of(rc["F"], rc["r"], rc["a0"], rc["b0"])
             hit = len(rst.alerts_model(models[key].decision_function(X), t, thr)) > 0
             if r["category"] == rst.KNOCK:
-                tp += hit; fn += not hit
+                tp += hit
+                fn += not hit
                 if not hit:
                     missed.append(r["filename"])
             else:
-                fp += hit; tn += not hit
+                fp += hit
+                tn += not hit
                 if hit:
                     flagged.append((r["filename"], r["category"]))
         out[label] = dict(metrics(tp, fn, fp, tn), missed_knock_clips=missed, falsely_flagged_clips=flagged)
+
+    # ===== BATCH 5 | main, part C: save the scorecard and print it =====
     n_non = out["clean-trained"]["non_knock_clips"]
-    out["always say no"] = metrics(0, out["knocks"], 0, n_non)
+    out["always say no"] = metrics(0, out["knocks"], 0, n_non)       # the "do nothing" comparison
     json.dump(out, open(os.path.join(a.out, "fold5_report.json"), "w", encoding="utf-8"), indent=1)
     print(f"{'':28s}{'accuracy':>10s}{'knocks':>9s}{'false alerts':>14s}{'precision':>11s}{'F1':>7s}")
     for label in ("always say no", "clean-trained", "mixed-sound-trained"):

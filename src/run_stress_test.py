@@ -19,11 +19,27 @@ Operating points are set at a matched false-alert rate on the pooled held-out cl
 the same way for every detector. ESC-50 non-knock clips are dense with sound events, so
 "false alerts per hour" here is per hour of ESC-50 sound, not per hour of a quiet home.
 
+Batches in this file
+   1  Settings
+   2  Turn sound into numbers (trim, frame features, window features, window positions)
+   3  Find knock starts and mix a knock into a background sound
+   4  Workers: process one clip, or one mixture, in a separate process
+   5  Alert rules and the error-bar formula
+   6  main, stage 1: frame features for every clip
+   7  main, stage 2: training windows (knock and not-knock)
+   8  main, stage 3: build the mixtures (training and stress-test)
+   9  main, stage 3b: turn the training mixtures into knock windows
+  10  main, stage 4: train per fold, score the clean clips and the test mixtures
+  11  main, stage 5: clean-test curves (knocks caught versus false alerts per hour)
+  12  main, stage 6: stress test at matched operating points
+  13  main, stage 7: print the summary and draw the charts
+
 Run from the doorknock folder:
     .venv/bin/python -I src/run_stress_test.py --data data/esc50_raw/ESC-50-master --out results
 """
 import os
 
+# Keep each worker process to one maths thread, so six workers do not fight over the CPU.
 for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMBA_NUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
@@ -38,7 +54,7 @@ from concurrent.futures import ProcessPoolExecutor
 import librosa
 import matplotlib
 
-matplotlib.use("Agg")
+matplotlib.use("Agg")                  # draw charts to files, no window needed
 import matplotlib.pyplot as plt
 import numpy as np
 import soundfile as sf
@@ -47,24 +63,27 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-SR, HOP, NFFT = 44100, 512, 2048
+
+# ===== BATCH 1 | Settings =====
+SR, HOP, NFFT = 44100, 512, 2048    # sample rate; a new frame every 512 samples; 2048 samples per frame
 SEC = HOP / SR                      # seconds per frame
-WIN_FR, STRIDE_FR = 43, 9           # 0.5 s windows, hop about 0.1 s
+WIN_FR, STRIDE_FR = 43, 9           # 0.5 s windows (43 frames), hop about 0.1 s (9 frames)
 KNOCK = "door_wood_knock"
 HOME = {"mouse_click", "keyboard_typing", "door_wood_creaks", "can_opening", "washing_machine",
         "vacuum_cleaner", "clock_alarm", "clock_tick", "glass_breaking", "footsteps", "clapping",
         "coughing", "sneezing", "breathing", "brushing_teeth", "drinking_sipping", "laughing",
         "snoring", "crying_baby", "pouring_water", "water_drops", "toilet_flush", "dog", "cat"}
-SNRS = [10, 5, 0, -5, -10]
-NEG_PER_CLIP = 5
-AUG_MIX_PER_KNOCK = 6
-TEST_BG_PER_KNOCK_SNR = 6
+SNRS = [10, 5, 0, -5, -10]          # knock volume relative to the background, in dB
+NEG_PER_CLIP = 5                    # training windows taken from each non-knock clip
+AUG_MIX_PER_KNOCK = 6               # mixtures made from each knock clip for training
+TEST_BG_PER_KNOCK_SNR = 6           # test mixtures per knock clip per volume
 TARGETS = [5.0, 20.0]               # false alerts per hour of ESC-50 sound
-DATA = None
+DATA = None                         # set in main(); the worker processes copy it when they start
 
 
-# ---------- audio and features ----------
+# ===== BATCH 2 | Turn sound into numbers =====
 def trim_bounds(y):
+    """Start and end sample of the real sound: first and last 10 ms piece that is not all zeros."""
     n = len(y) // 441
     w = np.abs(y[: n * 441]).reshape(n, 441).max(axis=1)
     nz = np.nonzero(w > 0)[0]
@@ -74,6 +93,7 @@ def trim_bounds(y):
 
 
 def frame_feats(y):
+    """One row of 44 numbers per 11.6 ms frame, plus the loudness (dB) and an 'onset strength' per frame."""
     st = np.abs(librosa.stft(y, n_fft=NFFT, hop_length=HOP))
     mel = librosa.feature.melspectrogram(S=st ** 2, sr=SR, n_mels=64)
     logmel = librosa.power_to_db(mel)
@@ -92,14 +112,16 @@ def frame_feats(y):
 
 
 def win_feats(F, r, a, b):
+    """Squash frames a..b into 136 numbers: mean, spread and max of each of the 44 columns, plus 4 loudness-shape numbers."""
     seg, rr = F[a:b], r[a:b]
-    rel = rr - rr.max()
+    rel = rr - rr.max()                      # loudness relative to this window's own loudest moment
     lin = 10 ** (rr / 20)
-    crest = lin.max() / (lin.mean() + 1e-12)
+    crest = lin.max() / (lin.mean() + 1e-12)     # how spiky the loudness is
     return np.concatenate([seg.mean(0), seg.std(0), seg.max(0), [rel.mean(), rel.std(), rel.min(), crest]])
 
 
 def window_spans(a0, b0, T):
+    """List of (start frame, end frame) for every 0.5 s window across the real sound."""
     b0 = min(b0, T)
     if b0 - a0 <= WIN_FR:
         return [(a0, max(b0, min(a0 + 8, T)))]
@@ -107,26 +129,31 @@ def window_spans(a0, b0, T):
 
 
 def windows_of(F, r, a0, b0):
+    """Features for every window, and the time (seconds) at the centre of each window."""
     spans = window_spans(a0, b0, F.shape[0])
     X = np.array([win_feats(F, r, s, e) for s, e in spans], dtype="float32")
     t = np.array([(s + e) / 2.0 * SEC for s, e in spans])
     return X, t
 
 
+# ===== BATCH 3 | Find knock starts and mix a knock into a background sound =====
 def knock_onsets(onset_env, a0, b0):
+    """Frames where a knock starts (sudden jumps in the sound). If none are found, use the biggest jump."""
     on = librosa.onset.onset_detect(onset_envelope=onset_env, sr=SR, hop_length=HOP, units="frames")
     on = [int(o) for o in on if a0 <= o < b0]
     return on if on else [int(a0 + np.argmax(onset_env[a0:b0]))]
 
 
 def rms_lin(x):
+    """Average loudness of a sound (root-mean-square), as a plain number."""
     return float(np.sqrt(np.mean(np.square(x.astype("float64")))) + 1e-12)
 
 
 def make_mix(k, kl, kh, bg, bl, bh, snr_db, rng):
+    """Place the knock at a random spot inside a background sound at a chosen volume (snr_db)."""
     n = len(bg)
     b = bg.astype("float64").copy()
-    floor = rng.normal(0.0, 10 ** (-55.0 / 20), size=n)
+    floor = rng.normal(0.0, 10 ** (-55.0 / 20), size=n)     # very quiet noise to replace silent padding
     pad = np.ones(n, dtype=bool)
     pad[bl:bh] = False
     b[pad] = floor[pad]
@@ -139,7 +166,7 @@ def make_mix(k, kl, kh, bg, bl, bh, snr_db, rng):
     return (b + gain * placed).astype("float32"), off, L
 
 
-# ---------- workers (forked processes) ----------
+# ===== BATCH 4 | Workers: process one clip, or one mixture, in a separate process =====
 def clip_worker(fname):
     y, sr = sf.read(os.path.join(DATA, "audio", fname), dtype="float32")
     lo, hi = trim_bounds(y)
@@ -158,11 +185,12 @@ def mix_worker(spec):
     mix, off, L = make_mix(k, kl, kh, bg, bl, bh, snr, rng)
     F, r, on = frame_feats(mix)
     return dict(F=F, r=r, on=on, off=off, L=L, kl=kl,
-                audio16=resample_poly(mix, 160, 441).astype("float32"))
+                audio16=resample_poly(mix, 160, 441).astype("float32"))    # 16 kHz copy for YAMNet later
 
 
-# ---------- detectors ----------
+# ===== BATCH 5 | Alert rules and the error-bar formula =====
 def merge(times, refr=1.0):
+    """Keep one alert per second: drop any alert that comes less than `refr` seconds after the last kept one."""
     out = []
     for x in sorted(times):
         if not out or x - out[-1] >= refr:
@@ -171,6 +199,8 @@ def merge(times, refr=1.0):
 
 
 def alerts_model(s, t, thi, tlo=None):
+    """Alert times from window scores s at times t. Alert if a score reaches thi; if tlo is given
+    (two-wave rule), also alert when two peaks above tlo fall 0.2 to 2.0 s apart."""
     cand = list(t[s >= thi])
     if tlo is not None:
         idx, _ = find_peaks(s, height=tlo, distance=2)
@@ -183,6 +213,7 @@ def alerts_model(s, t, thi, tlo=None):
 
 
 def alerts_rhythm(r, a0, b0, prom):
+    """The no-AI rule: alert when two clear loudness peaks fall within 1.5 s of each other."""
     env = r[a0:b0]
     if len(env) < 3:
         return []
@@ -193,11 +224,13 @@ def alerts_rhythm(r, a0, b0, prom):
 
 
 def alerts_loud(r, a0, b0, level):
+    """The loudness alarm: alert whenever the loudness (dB) reaches `level`."""
     fr = np.nonzero(r[a0:b0] >= level)[0]
     return merge([(a0 + f) * SEC for f in fr])
 
 
 def wilson(k, n, z=1.96):
+    """95% interval for a proportion k out of n (Wilson score interval): a range the true rate probably sits in."""
     if n == 0:
         return (0.0, 0.0)
     p = k / n
@@ -230,12 +263,12 @@ def main():
     is_home = np.array([c in HOME for c in cat])
     ctx = mp.get_context("fork")
 
-    # 1. frame features for every clip
+    # ===== BATCH 6 | main, stage 1: frame features for every clip =====
     with ProcessPoolExecutor(a.workers, mp_context=ctx) as ex:
         recs = list(ex.map(clip_worker, fname, chunksize=20))
     print(f"[{time.time() - t0:.0f}s] frame features for {n} clips", flush=True)
 
-    # 2. clean windows: per-clip test windows, training positives and negatives
+    # ===== BATCH 7 | main, stage 2: clean windows (test windows per clip, training knocks and not-knocks) =====
     rng = np.random.default_rng(0)
     clip_win = []
     pos_clean, neg_train = [], []
@@ -244,7 +277,7 @@ def main():
         clip_win.append((X, t))
         if is_knock[i]:
             for o in knock_onsets(rc["on"], rc["a0"], rc["b0"]):
-                for off in (-6, -4, -2):
+                for off in (-6, -4, -2):      # three windows that start just before each knock
                     s = max(rc["a0"], min(o + off, rc["b0"] - WIN_FR))
                     e = min(rc["F"].shape[0], s + WIN_FR)
                     pos_clean.append((fold[i], win_feats(rc["F"], rc["r"], s, e)))
@@ -252,17 +285,19 @@ def main():
             k = min(NEG_PER_CLIP, len(X))
             for j in rng.choice(len(X), size=k, replace=False):
                 neg_train.append((fold[i], X[j]))
-    pf = np.array([p[0] for p in pos_clean]); px = np.array([p[1] for p in pos_clean], dtype="float32")
-    nf = np.array([p[0] for p in neg_train]); nx = np.array([p[1] for p in neg_train], dtype="float32")
+    pf = np.array([p[0] for p in pos_clean])
+    px = np.array([p[1] for p in pos_clean], dtype="float32")
+    nf = np.array([p[0] for p in neg_train])
+    nx = np.array([p[1] for p in neg_train], dtype="float32")
     print(f"[{time.time() - t0:.0f}s] training windows: {len(px)} knock, {len(nx)} other", flush=True)
 
-    # 3. mixtures: augmentation (training) and stress test (held-out)
+    # ===== BATCH 8 | main, stage 3: mixtures (augmentation for training, stress test for held-out) =====
     knock_idx = np.nonzero(is_knock)[0]
     home_by_fold = {f: np.nonzero(is_home & (fold == f) & ~is_knock)[0] for f in range(1, 6)}
     aug_specs, aug_meta = [], []
     for ki in knock_idx:
         for m in range(AUG_MIX_PER_KNOCK):
-            other = [f for f in range(1, 6) if f != fold[ki]]
+            other = [f for f in range(1, 6) if f != fold[ki]]       # background comes from a different fold
             bf = int(rng.choice(other))
             bi = int(rng.choice(home_by_fold[bf]))
             snr = float(rng.uniform(-10, 15))
@@ -273,7 +308,7 @@ def main():
         f = fold[ki]
         for snr in SNRS:
             for m in range(TEST_BG_PER_KNOCK_SNR):
-                bi = int(rng.choice(home_by_fold[f]))
+                bi = int(rng.choice(home_by_fold[f]))                # test background is from the SAME fold
                 test_specs.append((fname[ki], fname[bi], float(snr), int(rng.integers(1 << 30))))
                 test_meta.append((ki, f, snr))
     with ProcessPoolExecutor(a.workers, mp_context=ctx) as ex:
@@ -295,10 +330,11 @@ def main():
     for m in aug_recs + test_recs:
         m.pop("audio16", None)
 
+    # ===== BATCH 9 | main, stage 3b: turn the training mixtures into knock windows =====
     aug_pos, aug_pos_kf, aug_pos_bf = [], [], []
     for mr, (ki, bf) in zip(aug_recs, aug_meta):
         kr = recs[ki]
-        shift = int(round((mr["off"] - mr["kl"]) / HOP))
+        shift = int(round((mr["off"] - mr["kl"]) / HOP))     # how far the knock moved inside the mixture
         T = mr["F"].shape[0]
         for o in knock_onsets(kr["on"], kr["a0"], kr["b0"]):
             o2 = o + shift
@@ -306,24 +342,29 @@ def main():
                 continue
             s = max(0, min(o2 - 4, T - WIN_FR))
             aug_pos.append(win_feats(mr["F"], mr["r"], s, min(T, s + WIN_FR)))
-            aug_pos_kf.append(fold[ki]); aug_pos_bf.append(bf)
-    aug_pos = np.array(aug_pos, dtype="float32"); aug_pos_kf = np.array(aug_pos_kf); aug_pos_bf = np.array(aug_pos_bf)
+            aug_pos_kf.append(fold[ki])
+            aug_pos_bf.append(bf)
+    aug_pos = np.array(aug_pos, dtype="float32")
+    aug_pos_kf = np.array(aug_pos_kf)
+    aug_pos_bf = np.array(aug_pos_bf)
     print(f"[{time.time() - t0:.0f}s] augmentation windows: {len(aug_pos)}", flush=True)
 
     test_win = [windows_of(mr["F"], mr["r"], 0, mr["F"].shape[0]) for mr in test_recs]
 
-    # 4. train per fold, score clean clips and test mixtures
+    # ===== BATCH 10 | main, stage 4: train per fold, score the clean clips and the test mixtures =====
     def mk():
         return make_pipeline(StandardScaler(), SVC(C=2.0, kernel="rbf", class_weight="balanced", cache_size=1000))
 
     scores = {"clean": [None] * n, "aug": [None] * n}
     mix_scores = {"clean": [None] * len(test_recs), "aug": [None] * len(test_recs)}
     for f in range(1, 6):
-        trp, trn = pf != f, nf != f
-        Xc = np.vstack([px[trp], nx[trn]]); yc = np.r_[np.ones(trp.sum()), np.zeros(trn.sum())]
+        trp, trn = pf != f, nf != f                      # training windows come only from the other four folds
+        Xc = np.vstack([px[trp], nx[trn]])
+        yc = np.r_[np.ones(trp.sum()), np.zeros(trn.sum())]
         m_clean = mk().fit(Xc, yc)
-        am = (aug_pos_kf != f) & (aug_pos_bf != f)
-        Xa = np.vstack([Xc, aug_pos[am]]); ya = np.r_[yc, np.ones(am.sum())]
+        am = (aug_pos_kf != f) & (aug_pos_bf != f)       # mixtures use neither the knock nor the background from fold f
+        Xa = np.vstack([Xc, aug_pos[am]])
+        ya = np.r_[yc, np.ones(am.sum())]
         m_aug = mk().fit(Xa, ya)
         for name, mdl in (("clean", m_clean), ("aug", m_aug)):
             for i in np.nonzero(fold == f)[0]:
@@ -333,7 +374,7 @@ def main():
                     mix_scores[name][j] = mdl.decision_function(test_win[j][0])
         print(f"[{time.time() - t0:.0f}s] fold {f} done (train windows clean {len(yc)}, aug {len(ya)})", flush=True)
 
-    # 5. clean-test curves
+    # ===== BATCH 11 | main, stage 5: clean-test curves (knocks caught versus false alerts per hour) =====
     neg_idx = np.nonzero(~is_knock)[0]
     hours_all = sum((recs[i]["b0"] - recs[i]["a0"]) * SEC for i in neg_idx) / 3600
     home_neg = [i for i in neg_idx if is_home[i]]
@@ -376,12 +417,13 @@ def main():
     print(f"[{time.time() - t0:.0f}s] clean curves done", flush=True)
 
     def pick(rows, target):
+        """The setting with the most knocks caught while staying within the false-alert budget."""
         ok = [r for r in rows if r["fa_all"] <= target]
         if ok:
             return max(ok, key=lambda r: (r["recall"], -r["fa_all"]))
         return min(rows, key=lambda r: r["fa_all"])
 
-    # 6. stress test at matched operating points
+    # ===== BATCH 12 | main, stage 6: stress test at matched operating points =====
     def mix_recall(variant, row):
         res, hl = {}, []
         for snr in SNRS:
@@ -390,13 +432,13 @@ def main():
                 if s_ != snr:
                     continue
                 mr, t_ = test_recs[j], test_win[j][1]
-                lo, hi = mr["off"] / SR - 0.2, (mr["off"] + mr["L"]) / SR + 1.0
+                lo, hi = mr["off"] / SR - 0.2, (mr["off"] + mr["L"]) / SR + 1.0     # the knock's time span, with a little slack
                 if variant.startswith("rhythm"):
                     al = alerts_rhythm(mr["r"], 0, mr["F"].shape[0], row["param"])
                 else:
                     nm = "aug" if "aug" in variant else "clean"
                     al = alerts_model(mix_scores[nm][j], t_, row["thi"], row["tlo"])
-                h = any(lo <= x <= hi for x in al)
+                h = any(lo <= x <= hi for x in al)       # a hit only counts if an alert lands inside the knock
                 hit += h
                 tot += 1
                 hl.append((int(ki), int(snr), int(h)))
@@ -425,14 +467,15 @@ def main():
                               false_alerts_per_hour_all=best["fa_all"], false_alerts_per_hour_home=best["fa_home"],
                               mixture_recall_by_snr=rec_by_snr, mixture_hits=hits)
         lb = pick(curves["loudness"], target)
-        block["loudness alarm (clean only)"] = dict(setting=lb, target_met=bool(lb["fa_all"] <= target), clean_recall=lb["recall"],
-                                                    false_alerts_per_hour_all=lb["fa_all"], false_alerts_per_hour_home=lb["fa_home"])
+        block["loudness alarm (clean only)"] = dict(
+            setting=lb, target_met=bool(lb["fa_all"] <= target), clean_recall=lb["recall"],
+            false_alerts_per_hour_all=lb["fa_all"], false_alerts_per_hour_home=lb["fa_home"])
         report["operating_points"][f"{target:g}_false_alerts_per_hour"] = block
     report["curves"] = curves
     with open(os.path.join(a.out, "stress_results.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=1, default=float)
 
-    # 7. summary printout and charts
+    # ===== BATCH 13 | main, stage 7: print the summary and draw the charts =====
     for tkey, block in report["operating_points"].items():
         print(f"\n== operating point: {tkey} (set on pooled held-out ESC-50 non-knock sound) ==")
         for fam, e in block.items():
@@ -447,19 +490,30 @@ def main():
                      ("rhythm", "rhythm rule (no AI)"), ("loudness", "loudness alarm")):
         rows = sorted(curves[key], key=lambda r: r["fa_all"])
         ax.plot([max(r["fa_all"], 0.5) for r in rows], [r["recall"] for r in rows], marker=".", label=lab)
-    ax.set_xscale("log"); ax.set_xlabel("false alerts per hour of ESC-50 non-knock sound"); ax.set_ylabel("knock clips caught")
-    ax.set_title("Clean clips: knocks caught vs false alerts"); ax.legend(fontsize=7); ax.grid(alpha=.3)
-    fig.tight_layout(); fig.savefig(os.path.join(a.out, "clean_curves.png"), dpi=140); plt.close(fig)
+    ax.set_xscale("log")
+    ax.set_xlabel("false alerts per hour of ESC-50 non-knock sound")
+    ax.set_ylabel("knock clips caught")
+    ax.set_title("Clean clips: knocks caught vs false alerts")
+    ax.legend(fontsize=7)
+    ax.grid(alpha=.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(a.out, "clean_curves.png"), dpi=140)
+    plt.close(fig)
 
     fig, axs = plt.subplots(1, len(TARGETS), figsize=(11, 4.2), sharey=True)
     for ax, (tkey, block) in zip(np.atleast_1d(axs), report["operating_points"].items()):
         for fam, e in block.items():
             if "mixture_recall_by_snr" in e:
                 ax.plot(SNRS, [e["mixture_recall_by_snr"][str(s)]["recall"] for s in SNRS], marker="o", label=fam)
-        ax.invert_xaxis(); ax.set_xlabel("knock volume relative to home sound (dB; right is quieter)")
-        ax.set_title(tkey.replace("_", " ")); ax.grid(alpha=.3)
-    np.atleast_1d(axs)[0].set_ylabel("knocks caught"); np.atleast_1d(axs)[0].legend(fontsize=7)
-    fig.tight_layout(); fig.savefig(os.path.join(a.out, "mixture_recall.png"), dpi=140); plt.close(fig)
+        ax.invert_xaxis()
+        ax.set_xlabel("knock volume relative to home sound (dB; right is quieter)")
+        ax.set_title(tkey.replace("_", " "))
+        ax.grid(alpha=.3)
+    np.atleast_1d(axs)[0].set_ylabel("knocks caught")
+    np.atleast_1d(axs)[0].legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(os.path.join(a.out, "mixture_recall.png"), dpi=140)
+    plt.close(fig)
     print(f"\nall done in {time.time() - t0:.0f}s")
 
 

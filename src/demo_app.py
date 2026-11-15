@@ -10,7 +10,20 @@ then open http://127.0.0.1:7860
 Add --share to get a temporary public link (gradio.live) that works for anyone you send it to
 while this script keeps running. The server may only hand out the example clips and two chart
 images, not the rest of the project.
+
+Batches in this file
+   1  Tools, paths, and loading the saved models
+   2  Read an audio file (including iPhone .m4a)
+   3  The detector: one waveform in, scores and alert times out
+   4  Say the result in words and draw the chart
+   5  The two button actions (try a clip, volume stress test)
+   6  Text for the Results tab
+   7  Which files the web server may share
+   8  The look of the page (colours, fonts, header)
+   9  The page layout: three tabs and their buttons
+  10  Start the server
 """
+# ===== BATCH 1 | Tools, paths, and loading the saved models =====
 import json
 import os
 import shutil
@@ -39,7 +52,8 @@ DISCLAIMER = ("**Prototype, not a safety device or medical advice.** Trained on 
               "(ESC-50, 40 knock clips). It will miss knocks and raise false alerts.")
 
 
-MAX_BYTES = 25_000_000
+# ===== BATCH 2 | Read an audio file (including iPhone .m4a) =====
+MAX_BYTES = 25_000_000     # biggest upload we accept (25 MB)
 
 
 def _decode_with_gstreamer(path):
@@ -66,6 +80,7 @@ def _decode_with_gstreamer(path):
 
 
 def load_audio(path):
+    """Load any common audio file as 44.1 kHz mono, at most 30 seconds; fall back to GStreamer for .m4a."""
     try:
         y, _ = librosa.load(path, sr=SR, mono=True, duration=30)
     except Exception:
@@ -82,7 +97,9 @@ def load_audio(path):
     return y
 
 
+# ===== BATCH 3 | The detector: one waveform in, scores and alert times out =====
 def analyse(y, loud_level):
+    """Run the loudness alarm and both models on one waveform. Uses the same functions as the experiments."""
     lo, hi = rst.trim_bounds(y)
     F, r, _ = rst.frame_feats(y)
     T = F.shape[0]
@@ -96,7 +113,9 @@ def analyse(y, loud_level):
     return res
 
 
+# ===== BATCH 4 | Say the result in words and draw the chart =====
 def say(name, alerts, span=None):
+    """One bullet of text for one detector. If we know where the knock really is (span), say caught or MISSED."""
     if not alerts:
         return f"- **{name}:** no alert"
     when = ", ".join(f"{a:.1f} s" for a in alerts[:4])
@@ -111,6 +130,7 @@ def say(name, alerts, span=None):
 
 
 def draw(res, span=None):
+    """Chart: model scores with alert levels on top, loudness on the bottom."""
     fig = Figure(figsize=(8, 5.2))
     ax, ax2 = fig.subplots(2, 1, sharex=True)
     for key, label, color in (("clean", "model trained on clean clips", "#d95f02"),
@@ -134,11 +154,17 @@ def draw(res, span=None):
     ax2.set_ylabel("loudness (dB)")
     ax2.set_xlabel("seconds (grey band = where the knock really is)" if span else "seconds")
     ax.legend(fontsize=7, loc="upper right")
+    for axx in (ax, ax2):  # thin grey frame and light grid to match the page
+        axx.grid(color="#eaecef", lw=0.8)
+        for sp in axx.spines.values():
+            sp.set_color("#d1d5da")
     fig.tight_layout()
     return fig
 
 
+# ===== BATCH 5 | The two button actions (try a clip, volume stress test) =====
 def try_clip(path, loud_level):
+    """Button 1: load the chosen clip, run all detectors, return the text and the chart."""
     if not path:
         return "Pick an example or upload a clip first.", None
     y = load_audio(path)
@@ -150,6 +176,7 @@ def try_clip(path, loud_level):
 
 
 def stress(knock_name, bg_cat, bg_num, snr, loud_level):
+    """Button 2: mix a real knock into a household sound at the chosen volume, then run all detectors."""
     k, _ = sf.read(os.path.join(AUDIO, knock_name), dtype="float32")
     names = CFG["demo_home"][bg_cat]
     bg, _ = sf.read(os.path.join(AUDIO, names[int(bg_num) % len(names)]), dtype="float32")
@@ -165,6 +192,7 @@ def stress(knock_name, bg_cat, bg_num, snr, loud_level):
     return (SR, play), text + "\n\n" + DISCLAIMER, draw(res, span)
 
 
+# ===== BATCH 6 | Text for the Results tab =====
 ABOUT = f"""
 ### What this is
 A prototype that listens for door knocks for a person with hearing loss and tests the everyday sounds most likely to trigger a nuisance alert. All numbers come from the public ESC-50 dataset (2,000 clips, 40 of them knocks), tested on folds the models never trained on.
@@ -186,6 +214,7 @@ A prototype that listens for door knocks for a person with hearing loss and test
 """
 
 
+# ===== BATCH 7 | Which files the web server may share =====
 EX_NEG = ("footsteps", "clock_tick", "door_wood_creaks", "clapping", "can_opening", "keyboard_typing")
 
 
@@ -197,6 +226,105 @@ def example_files():
     return files
 
 
+# ===== BATCH 8 | The look of the page (colours, fonts, header) =====
+# Look: a plain 2017-style code-hosting page (white page, dark top bar, thin grey borders,
+# system fonts, blue links, green button). Style only; it loads no fonts or files from other sites.
+GH_FONT = ("-apple-system", "BlinkMacSystemFont", "Segoe UI", "Helvetica", "Arial", "sans-serif")
+GH_MONO = ("SFMono-Regular", "Consolas", "Liberation Mono", "Menlo", "Courier", "monospace")
+THEME = gr.themes.Base(font=GH_FONT, font_mono=GH_MONO, radius_size=gr.themes.sizes.radius_sm)
+FORCE_LIGHT = "() => { document.body.classList.remove('dark'); document.documentElement.classList.remove('dark'); }"
+
+HEADER = """
+<div class="gh-bar"><span class="gh-brand">Did someone knock?</span><span class="gh-bar-note">door-knock alert prototype</span></div>
+<div class="gh-head">
+  <h1>Did someone knock?</h1>
+  <p>A door-knock alert prototype for a person with hearing loss. Two small models (SVMs) listen to half-second pieces of sound and score each one.</p>
+  <span class="gh-lbl gh-y">prototype</span><span class="gh-lbl gh-r">not a safety device</span><span class="gh-lbl gh-b">ESC-50 dataset</span><span class="gh-lbl gh-g">trained on folds 1 to 4</span>
+</div>
+<div class="gh-flash"><b>Prototype, not a safety device or medical advice.</b> Trained on a small public dataset (ESC-50, 40 knock clips). It will miss knocks and raise false alerts.</div>
+"""
+
+GH_CSS = """
+:root, .dark, body, .gradio-container {
+  --body-background-fill: #ffffff; --background-fill-primary: #ffffff; --background-fill-secondary: #f6f8fa;
+  --body-text-color: #24292e; --body-text-color-subdued: #586069; --block-title-text-color: #24292e; --block-label-text-color: #24292e;
+  --block-background-fill: #ffffff; --block-border-color: #d1d5da; --border-color-primary: #d1d5da; --block-border-width: 1px;
+  --block-radius: 3px; --block-shadow: none; --block-label-background-fill: #f6f8fa; --block-label-border-color: #d1d5da;
+  --input-background-fill: #fafbfc; --input-background-fill-focus: #ffffff; --input-border-color: #d1d5da; --input-radius: 3px;
+  --input-shadow: inset 0 1px 2px rgba(27,31,35,.075); --input-shadow-focus: inset 0 1px 2px rgba(27,31,35,.075), 0 0 0 3px rgba(3,102,214,.3);
+  --input-border-color-focus: #2188ff; --color-accent: #0366d6; --color-accent-soft: #f1f8ff; --link-text-color: #0366d6; --link-text-color-hover: #0366d6;
+  --link-text-color-active: #0366d6; --link-text-color-visited: #0366d6; --checkbox-label-background-fill: #fafbfc;
+  --table-even-background-fill: #ffffff; --table-odd-background-fill: #f6f8fa; --table-border-color: #dfe2e5; --table-row-focus: #f1f8ff;
+  --button-primary-background-fill: linear-gradient(-180deg, #34d058 0%, #28a745 90%); --button-primary-background-fill-hover: linear-gradient(-180deg, #2fcb53 0%, #269f42 90%);
+  --button-primary-text-color: #ffffff; --button-primary-border-color: rgba(27,31,35,.2); --button-primary-border-color-hover: rgba(27,31,35,.2);
+  --button-secondary-background-fill: linear-gradient(-180deg, #fafbfc 0%, #eff3f6 90%); --button-secondary-background-fill-hover: linear-gradient(-180deg, #f0f3f6 0%, #e6ebf1 90%);
+  --button-secondary-text-color: #24292e; --button-secondary-border-color: rgba(27,31,35,.2);
+  --slider-color: #0366d6; --shadow-drop: none; --shadow-drop-lg: none;
+}
+body, .gradio-container { background: #ffffff !important; color: #24292e; font-size: 14px; line-height: 1.5; }
+.gradio-container { max-width: 980px !important; width: 100% !important; min-width: 0 !important; margin: 0 auto !important; padding: 0 16px 40px !important; }
+@media (max-width: 600px) { .gh-bar { flex-wrap: wrap; row-gap: 2px; } .gh-head h1 { font-size: 18px; } }
+footer { display: none !important; }
+html, body { overflow-x: hidden !important; }
+.gradio-container { overflow: visible !important; }
+
+/* top bar, full width */
+.gh-bar { background: #24292e; color: #ffffff; padding: 16px 4px; display: flex; align-items: baseline; gap: 14px; margin: 0 -16px;
+  box-shadow: 0 0 0 100vmax #24292e; clip-path: inset(0 -100vmax); }
+.gh-bar .gh-brand { font-weight: 600; font-size: 16px; color: #ffffff !important; }
+.gh-bar .gh-bar-note { font-size: 12px; color: #c8ccd0 !important; }
+/* title area */
+.gh-head { background: #fafbfc; margin: 0 -16px; padding: 24px 4px 16px; border-bottom: 1px solid #e1e4e8;
+  box-shadow: 0 0 0 100vmax #fafbfc; clip-path: inset(0 -100vmax); }
+.gh-head h1 { font-size: 20px; font-weight: 400; color: #0366d6 !important; margin: 0 0 4px; }
+.gh-head p { margin: 0 0 10px; color: #586069; }
+.gh-lbl { display: inline-block; font-size: 12px; font-weight: 600; line-height: 1; padding: 4px 7px; margin-right: 6px; border-radius: 3px; color: #fff; }
+.gh-y { background: #e6a700; color: #24292e; } .gh-r { background: #d73a49; } .gh-b { background: #0366d6; } .gh-g { background: #28a745; }
+.gh-flash { margin: 16px -12px 12px; padding: 10px 16px; background: #fffbdd; color: #735c0f; border: 1px solid #d9d0a5; border-radius: 3px; }
+
+/* tabs look like repository tabs */
+.tab-wrapper, .tab-container { border-bottom: 1px solid #e1e4e8 !important; }
+button[role="tab"] { color: #586069 !important; background: transparent !important; border: 1px solid transparent !important; border-bottom: 0 !important;
+  border-radius: 3px 3px 0 0 !important; padding: 8px 16px !important; font-size: 14px !important; font-weight: 400 !important; margin-bottom: -1px; box-shadow: none !important; }
+button[role="tab"]:hover { color: #24292e !important; }
+button[role="tab"].selected, button[role="tab"][aria-selected="true"] { color: #24292e !important; background: #ffffff !important; border-color: #e1e4e8 !important;
+  border-top: 3px solid #f9826c !important; font-weight: 600 !important; }
+button[role="tab"].selected::after, .tab-container::after, .tab-wrapper::after { display: none !important; background: transparent !important; }
+
+/* buttons: green and grey, like 2017 */
+button.primary, .primary { border-radius: 3px !important; font-size: 14px !important; font-weight: 600 !important; border: 1px solid rgba(27,31,35,.2) !important;
+  background-color: #28a745 !important; background-image: linear-gradient(-180deg, #34d058 0%, #28a745 90%) !important; color: #fff !important; box-shadow: none !important; }
+button.primary:hover { background-image: linear-gradient(-180deg, #2fcb53 0%, #269f42 90%) !important; }
+button.secondary { border-radius: 3px !important; font-weight: 600 !important; border: 1px solid rgba(27,31,35,.2) !important; box-shadow: none !important;
+  background-image: linear-gradient(-180deg, #fafbfc 0%, #eff3f6 90%) !important; color: #24292e !important; }
+
+/* panels, labels, inputs */
+.block, .form { border-radius: 3px !important; box-shadow: none !important; }
+label > span, .block-title, .label-wrap span { font-weight: 600; color: #24292e; font-size: 14px; }
+input[type="number"], textarea, input[type="text"], select { border: 1px solid #d1d5da !important; border-radius: 3px !important; background: #fafbfc !important; box-shadow: inset 0 1px 2px rgba(27,31,35,.075) !important; }
+input:focus, textarea:focus, select:focus { border-color: #2188ff !important; background: #fff !important; outline: none !important; box-shadow: inset 0 1px 2px rgba(27,31,35,.075), 0 0 0 3px rgba(3,102,214,.3) !important; }
+input[type="range"] { accent-color: #0366d6; }
+
+/* text like a rendered readme */
+.prose, .md, .markdown { color: #24292e; font-size: 14px; line-height: 1.5; }
+.prose a, .md a { color: #0366d6; text-decoration: none; } .prose a:hover, .md a:hover { text-decoration: underline; }
+.prose h1, .prose h2, .prose h3, .md h1, .md h2, .md h3 { color: #24292e; font-weight: 600; line-height: 1.25; margin: 20px 0 12px; }
+.prose h2, .md h2 { font-size: 21px; padding-bottom: 5px; border-bottom: 1px solid #eaecef; }
+.prose h3, .md h3 { font-size: 17px; }
+.prose code, .md code { background: rgba(27,31,35,.05); border-radius: 3px; padding: 2px 5px; font-size: 85%; }
+.prose table, .md table { border-collapse: collapse; width: 100%; display: table; margin: 0 0 12px; }
+.prose th, .prose td, .md th, .md td { border: 1px solid #dfe2e5 !important; padding: 6px 13px; background: transparent; }
+.prose th, .md th { font-weight: 600; background: #ffffff; }
+.prose tr:nth-child(2n) td, .md tr:nth-child(2n) td { background: #f6f8fa; }
+.prose ul, .md ul { padding-left: 2em; }
+.block.readme { border: 1px solid #d1d5da !important; border-radius: 3px !important; padding: 0 !important; overflow: hidden; background: #fff; }
+.block.readme::before { content: "Results and limits"; display: block; padding: 10px 16px; background: #f6f8fa; border-bottom: 1px solid #d1d5da; font-weight: 600; }
+.prose.readme { border: 0 !important; padding: 4px 24px 16px !important; }
+.block.flash-out { border-left: 3px solid #28a745 !important; }
+"""
+
+
+# ===== BATCH 9 | The page layout: three tabs and their buttons =====
 def build_ui():
     knocks = CFG["demo_knocks"]
     homes = sorted(CFG["demo_home"])
@@ -204,7 +332,7 @@ def build_ui():
     for c in EX_NEG:
         examples.append([os.path.join(AUDIO, CFG["demo_home"][c][0]), -25])
     with gr.Blocks(title="Did someone knock?") as demo:
-        gr.Markdown("# Did someone knock?\nA door-knock alert prototype for a person with hearing loss. " + DISCLAIMER)
+        gr.HTML(HEADER)
         with gr.Tab("Try a clip"):
             gr.Markdown("Pick an example (clips the models have never seen), or upload or record your own. "
                         "The first 8 examples are every held-out knock clip, not a chosen selection: on these 8 each model "
@@ -214,7 +342,7 @@ def build_ui():
                              label="Sound clip (WAV, MP3, M4A and similar; iPhone voice memos work)")
             level = gr.Slider(-50, -3, value=-25, step=1, label="Loudness alarm level (dB). Louder than this raises an alert. Set by you, not tuned.")
             btn = gr.Button("Listen for a knock", variant="primary")
-            out_text = gr.Markdown()
+            out_text = gr.Markdown(elem_classes=["flash-out"])
             out_plot = gr.Plot()
             gr.Examples(examples=examples, inputs=[audio, level], label="Example clips (never seen in training)")
             btn.click(try_clip, [audio, level], [out_text, out_plot])
@@ -231,11 +359,11 @@ def build_ui():
             lv = gr.Slider(-50, -3, value=-25, step=1, label="Loudness alarm level (dB)")
             b2 = gr.Button("Mix and listen", variant="primary")
             mixed = gr.Audio(label="The mixed sound", type="numpy")
-            t2 = gr.Markdown()
+            t2 = gr.Markdown(elem_classes=["flash-out"])
             p2 = gr.Plot()
             b2.click(stress, [k, c, n, s, lv], [mixed, t2, p2])
         with gr.Tab("Results and limits"):
-            gr.Markdown(ABOUT)
+            gr.Markdown(ABOUT, elem_classes=["readme"])
             for img in ("mixture_recall.png", "clean_curves.png"):
                 path = os.path.join(ROOT, "results", img)
                 if os.path.exists(path):
@@ -243,8 +371,10 @@ def build_ui():
     return demo
 
 
+# ===== BATCH 10 | Start the server =====
 if __name__ == "__main__":
     # Local only by default. Add --share for a temporary public link (through Gradio's relay).
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 7860
     build_ui().launch(server_name="127.0.0.1", server_port=port, show_error=True,
-                      allowed_paths=example_files(), share="--share" in sys.argv)
+                      allowed_paths=example_files(), share="--share" in sys.argv,
+                      theme=THEME, css=GH_CSS, js=FORCE_LIGHT)
